@@ -115,7 +115,7 @@ int setInterfaceState(const char *interfaceName, int state)
   return 0;
 }
 
-int main(int argc, char *argv[]){
+int changeMac(int argc, char *argv[]){
   if (argc != 2){
     fprintf(stderr, "Use: %s <interfaceName>\n", argv[0]);
     return 1;
