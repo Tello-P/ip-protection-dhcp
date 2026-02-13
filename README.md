@@ -29,24 +29,9 @@ To compile and run this project, you need:
 
 ## Installation and Compilation
 
-The project uses a structured directory layout. Ensure your folder structure matches the following:
-
-* `src/`: Source files (`.c`)
-* `include/`: Header files (`.h`)
-* `bin/`: Compiled executables
-
-To compile the project using the provided Makefile:
-
 ```bash
-make
-
-```
-
-To remove compiled objects and binaries:
-
-```bash
-make clean
-
+chmod +x scripts/install.sh
+./scripts/install.sh
 ```
 
 ---
