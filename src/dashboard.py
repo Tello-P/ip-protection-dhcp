@@ -4,25 +4,21 @@ import os
 import json
 import threading
 
-# Configuración visual
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 class PrivIPApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-
-        # --- RUTAS ABSOLUTAS ---
+        
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.binary_path = os.path.join(self.base_dir, "bin", "privipchanger")
         self.monitor_script = os.path.join(self.base_dir, "src", "monitor.py")
         self.config_file = os.path.expanduser("~/.privip_config.json")
         self.service_path = os.path.expanduser("~/.config/systemd/user/privip-monitor.service")
 
-        # Cargar Configuración
         self.config = self.load_config()
-        
-        # UI Setup
+
         self.title("PrivIP Changer Pro")
         self.geometry("600x700")
         self.setup_ui()
@@ -47,7 +43,7 @@ class PrivIPApp(ctk.CTk):
         self.lbl_title = ctk.CTkLabel(self, text="🛡️ IP Protection Dashboard", font=("Roboto", 24, "bold"))
         self.lbl_title.pack(pady=20)
 
-        # Selector de Interfaz
+    
         self.frame_iface = ctk.CTkFrame(self)
         self.frame_iface.pack(pady=10, padx=20, fill="x")
         
@@ -60,7 +56,7 @@ class PrivIPApp(ctk.CTk):
                                        command=self.on_interface_change)
         self.combo.pack(side="right", padx=10, pady=10)
 
-        # --- PANEL DE ESTADO (IP Y MAC) ---
+ 
         self.frame_status = ctk.CTkFrame(self, fg_color="#2b2b2b")
         self.frame_status.pack(pady=15, padx=20, fill="x")
 
@@ -70,12 +66,11 @@ class PrivIPApp(ctk.CTk):
         self.lbl_ip = ctk.CTkLabel(self.frame_status, text="IP: Scanning...", font=("Consolas", 14), text_color="#3498db")
         self.lbl_ip.pack(pady=5)
 
-        # Botón de Cambio Manual
+ 
         self.btn_run = ctk.CTkButton(self, text="FORCE IDENTITY CHANGE", fg_color="#c0392b", hover_color="#e74c3c", 
                                      height=45, font=("Roboto", 14, "bold"), command=self.run_manual)
         self.btn_run.pack(pady=10, padx=20, fill="x")
 
-        # Switch de Servicio (Firefox)
         self.frame_service = ctk.CTkFrame(self)
         self.frame_service.pack(pady=10, padx=20, fill="x")
         
@@ -83,7 +78,7 @@ class PrivIPApp(ctk.CTk):
         if self.config.get("auto_firefox"): self.switch_auto.select()
         self.switch_auto.pack(pady=15, padx=10)
 
-        # Consola de Logs
+
         self.textbox_log = ctk.CTkTextbox(self, height=180, font=("Consolas", 12))
         self.textbox_log.pack(pady=10, padx=20, fill="both", expand=True)
 
@@ -134,7 +129,7 @@ class PrivIPApp(ctk.CTk):
         except Exception as e:
             self.log(f"[ERROR] {str(e)}")
         
-        self.refresh_network_info() # Actualizar después de cambiar
+        self.refresh_network_info()
         self.btn_run.configure(state="normal", text="FORCE IDENTITY CHANGE")
 
     def toggle_service(self):
