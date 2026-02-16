@@ -42,6 +42,7 @@ source .venv/bin/activate
 echo -e "${BLUE}Installing Python libraries...${NC}"
 pip install --upgrade pip
 pip install -r requirements.txt
+chmod +x ../cprivip.sh
 
 echo -e "\n${BLUE}==========================================${NC}"
 echo -e "${GREEN}INSTALLATION COMPLETED SUCCESSFULLY${NC}"
