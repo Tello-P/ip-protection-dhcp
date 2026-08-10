@@ -8,8 +8,16 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    changeMac(2, argv);
-    dhcpClientRenew(2, argv); //set to 0.0.0.0
-    dhcpClientRenew(2, argv); // get new IP addr
+    if (changeMac(2, argv) != 0) {
+        fprintf(stderr, "MAC change failed, aborting\n");
+        return 1;
+    }
+
+    /* DISCOVER, and retransmit once if the first attempt times out */
+    if (dhcpClientRenew(2, argv) != 0 && dhcpClientRenew(2, argv) != 0) {
+        fprintf(stderr, "No DHCP offer received\n");
+        return 1;
+    }
+
     return 0;
 }

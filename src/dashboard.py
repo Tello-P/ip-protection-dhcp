@@ -1,6 +1,8 @@
 import customtkinter as ctk
 import subprocess
 import os
+import re
+import sys
 import json
 import threading
 
@@ -100,16 +102,17 @@ class PrivIPApp(ctk.CTk):
             with open(f"/sys/class/net/{iface}/address", "r") as f:
                 mac = f.read().strip().upper()
                 self.lbl_mac.configure(text=f"MAC: {mac}")
-        except:
+        except OSError:
             self.lbl_mac.configure(text="MAC: Error al leer")
 
         # Obtener IP
         try:
-            cmd = f"ip -4 addr show {iface} | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){{3}}' | head -n 1"
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            ip = res.stdout.strip()
+            res = subprocess.run(["ip", "-4", "addr", "show", iface],
+                                 capture_output=True, text=True)
+            match = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", res.stdout)
+            ip = match.group(1) if match else ""
             self.lbl_ip.configure(text=f"IP: {ip if ip else 'Desconectado'}")
-        except:
+        except (OSError, subprocess.SubprocessError):
             self.lbl_ip.configure(text="IP: Error")
 
     def run_manual(self):
@@ -125,7 +128,10 @@ class PrivIPApp(ctk.CTk):
             stdout, stderr = process.communicate()
             if stdout: self.log(f"[STDOUT] {stdout.strip()}")
             if stderr: self.log(f"[STDERR] {stderr.strip()}")
-            self.log("[DONE] Process finished.")
+            if process.returncode == 0:
+                self.log("[DONE] Identity changed.")
+            else:
+                self.log(f"[FAIL] Binary exited with code {process.returncode} - identity NOT changed.")
         except Exception as e:
             self.log(f"[ERROR] {str(e)}")
         
@@ -138,6 +144,13 @@ class PrivIPApp(ctk.CTk):
         if self.switch_auto.get(): self.install_service()
         else: self.uninstall_service()
 
+    def _service_python(self):
+        """El intérprete que debe usar el servicio: el del venv, donde vive psutil."""
+        venv_python = os.path.join(self.base_dir, ".venv", "bin", "python")
+        if os.path.exists(venv_python):
+            return venv_python
+        return sys.executable or "/usr/bin/python3"
+
     def install_service(self):
         os.makedirs(os.path.dirname(self.service_path), exist_ok=True)
         content = f"""[Unit]
@@ -145,8 +158,9 @@ Description=PrivIP Firefox Watchdog
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 {self.monitor_script}
+ExecStart={self._service_python()} {self.monitor_script}
 Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=default.target

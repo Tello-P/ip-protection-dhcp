@@ -13,17 +13,35 @@ OBJS        := $(patsubst $(CORE_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 DEPS        := $(OBJS:.o=.d)
 
 
-all: $(TARGET)
+# V=1 shows the compiler invocations, and therefore the warnings
+V           ?= 0
+ifeq ($(V),1)
+Q           :=
+else
+Q           := @
+endif
+
+CAPS        := cap_net_raw,cap_net_admin+ep
+
+all: $(TARGET) setcap
 
 $(TARGET): $(OBJS)
-	@mkdir -p $(BIN_DIR)
-	@$(CC) $(OBJS) -o $@ $(LDFLAGS)
+	$(Q)mkdir -p $(BIN_DIR)
+	$(Q)$(CC) $(OBJS) -o $@ $(LDFLAGS)
 	@echo "PROJECT COMPILED: $@"
 
 $(BUILD_DIR)/%.o: $(CORE_DIR)/%.c
-	@mkdir -p $(BUILD_DIR)
-	@$(CC) $(CFLAGS) -c $< -o $@
+	$(Q)mkdir -p $(BUILD_DIR)
+	$(Q)$(CC) $(CFLAGS) -c $< -o $@
 	@echo "Compiled: $<"
+
+# Capabilities live on the inode, so every relink throws them away
+setcap: $(TARGET)
+	@if sudo -n setcap '$(CAPS)' $(TARGET) 2>/dev/null; then \
+	  echo "Capabilities set: $(CAPS)"; \
+	else \
+	  echo "NOTE: run 'sudo setcap $(CAPS) $(TARGET)' - the binary needs it to run unprivileged"; \
+	fi
 
 -include $(DEPS)
 
@@ -34,9 +52,11 @@ clean:
 
 help:
 	@echo "Available commands:"
-	@echo "  make       - Builds the privipchanger binary"
-	@echo "  make clean - Removes temporary files and the binary"
-	@echo "  make help  - Shows this help message"
+	@echo "  make        - Builds the privipchanger binary and applies capabilities"
+	@echo "  make V=1     - Same, but shows the compiler invocations and warnings"
+	@echo "  make setcap  - Re-applies cap_net_raw,cap_net_admin to the binary"
+	@echo "  make clean   - Removes temporary files and the binary"
+	@echo "  make help    - Shows this help message"
 
-.PHONY: all clean help
+.PHONY: all clean help setcap
 

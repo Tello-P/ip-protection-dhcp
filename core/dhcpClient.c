@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <ifaddrs.h>
+#include <time.h>
 
 typedef u_int32_t ip4_t;
 
@@ -96,9 +97,14 @@ do{                                                                     \
 
 #define DHCP_MAGIC_COOKIE   0x63825363
 
-verbose_level_t program_verbose_level = VERBOSE_LEVEL_DEBUG;
+#define DHCP_OFFER_TIMEOUT_SEC  10
+#define DHCP_CAPTURE_FILTER     "udp and src port 67 and dst port 68"
+
+verbose_level_t program_verbose_level = VERBOSE_LEVEL_INFO;
 pcap_t *pcap_handle;
 u_int32_t ip;
+/* xid of the DISCOVER we sent - replies carrying another one are not ours */
+static u_int32_t dhcp_xid;
 
 /*
  * Print the Given ethernet packet in hexa format - Just for debugging
@@ -127,7 +133,12 @@ get_mac_address(char *dev_name, u_int8_t *mac)
     int fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
     int result;
 
-    strcpy(s.ifr_name, dev_name);
+    if (fd < 0)
+        return -1;
+
+    memset(&s, 0, sizeof(s));
+    strncpy(s.ifr_name, dev_name, IFNAMSIZ - 1);
+    s.ifr_name[IFNAMSIZ - 1] = '\0';
     result = ioctl(fd, SIOCGIFHWADDR, &s);
     close(fd);
     if (result != 0)
@@ -200,7 +211,11 @@ in_cksum(unsigned short *addr, int len)
 static void
 dhcp_input(dhcp_t *dhcp)
 {
-    if (dhcp->opcode != DHCP_OPTION_OFFER)
+    /* opcode holds a BOOTP operation code, not a DHCP message type */
+    if (dhcp->opcode != DHCP_BOOTREPLY)
+        return;
+
+    if (dhcp->xid != dhcp_xid)
         return;
 
     /* Get the IP address given by the server */
@@ -229,7 +244,14 @@ ip_input(struct ip * ip_packet)
 {
     /* Care only about UDP - since DHCP sits over UDP */
     if (ip_packet->ip_p == IPPROTO_UDP)
-        udp_input((struct udphdr *)((char *)ip_packet + sizeof(struct ip)));
+    {
+        size_t hdr_len = (size_t)ip_packet->ip_hl * 4;
+
+        if (hdr_len < sizeof(struct ip))
+            return;
+
+        udp_input((struct udphdr *)((char *)ip_packet + hdr_len));
+    }
 }
 
 /*
@@ -240,12 +262,17 @@ ether_input(u_char *args, const struct pcap_pkthdr *header, const u_char *frame)
 {
     struct ether_header *eframe = (struct ether_header *)frame;
 
+    (void)args;
+
     PRINT(VERBOSE_LEVEL_DEBUG, "Received a frame with length of [%d]", header->len);
 
     if (program_verbose_level == VERBOSE_LEVEL_DEBUG)
-        print_packet(frame, header->len);
+        print_packet(frame, header->caplen);
 
-    if (htons(eframe->ether_type) == ETHERTYPE_IP)
+    if (header->caplen < sizeof(struct ether_header) + sizeof(struct ip))
+        return;
+
+    if (ntohs(eframe->ether_type) == ETHERTYPE_IP)
         ip_input((struct ip *)(frame + sizeof(struct ether_header)));
 }
 
@@ -321,8 +348,10 @@ dhcp_output(dhcp_t *dhcp, u_int8_t *mac, int *len)
 
     dhcp->opcode = DHCP_BOOTREQUEST;
     dhcp->htype = DHCP_HARDWARE_TYPE_10_EHTHERNET;
-    dhcp->hlen = 6;
-    memcpy(dhcp->chaddr, mac, DHCP_CHADDR_LEN);
+    dhcp->hlen = ETHER_ADDR_LEN;
+    dhcp->xid = dhcp_xid;
+    /* Only the 6 bytes we own - the memset above supplies the padding */
+    memcpy(dhcp->chaddr, mac, ETHER_ADDR_LEN);
 
     dhcp->magic_cookie = htonl(DHCP_MAGIC_COOKIE);
 }
@@ -347,17 +376,16 @@ static int
 fill_dhcp_discovery_options(dhcp_t *dhcp)
 {
     int len = 0;
-    u_int32_t req_ip;
     u_int8_t parameter_req_list[] = {MESSAGE_TYPE_REQ_SUBNET_MASK, MESSAGE_TYPE_ROUTER, MESSAGE_TYPE_DNS, MESSAGE_TYPE_DOMAIN_NAME};
     u_int8_t option;
 
     option = DHCP_OPTION_DISCOVER;
     len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_DHCP, &option, sizeof(option));
-    req_ip = htonl(0xc0a8010a);
-    len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_REQ_IP, (u_int8_t *)&req_ip, sizeof(req_ip));
+    /* No option 50: we have no previous lease, and naming a fixed address
+     * would be a claim on someone else's. */
     len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_PARAMETER_REQ_LIST, (u_int8_t *)&parameter_req_list, sizeof(parameter_req_list));
-    option = 0;
-    len += fill_dhcp_option(&dhcp->bp_options[len], MESSAGE_TYPE_END, &option, sizeof(option));
+    /* Bare terminator - no length, no value (RFC 2132) */
+    dhcp->bp_options[len++] = MESSAGE_TYPE_END;
 
     return len;
 }
@@ -389,6 +417,62 @@ dhcp_discovery(u_int8_t *mac)
     return 0;
 }
 
+/*
+ * Restrict the capture to DHCP server replies, so we do not copy every frame
+ * on the segment to userspace.
+ */
+static int
+set_capture_filter(pcap_t *handle, const char *dev)
+{
+    struct bpf_program filter;
+    bpf_u_int32 net = 0, mask = 0;
+    char errbuf[PCAP_ERRBUF_SIZE];
+
+    if (pcap_lookupnet(dev, &net, &mask, errbuf) != 0)
+        mask = PCAP_NETMASK_UNKNOWN;
+
+    if (pcap_compile(handle, &filter, DHCP_CAPTURE_FILTER, 1, mask) != 0)
+    {
+        PRINT(VERBOSE_LEVEL_ERROR, "Couldn't compile filter: %s", pcap_geterr(handle));
+        return -1;
+    }
+
+    if (pcap_setfilter(handle, &filter) != 0)
+    {
+        PRINT(VERBOSE_LEVEL_ERROR, "Couldn't install filter: %s", pcap_geterr(handle));
+        pcap_freecode(&filter);
+        return -1;
+    }
+
+    pcap_freecode(&filter);
+    return 0;
+}
+
+/*
+ * Pump the capture loop until an OFFER for our xid arrives or we run out of
+ * time. Returns 0 if an address was offered, -1 on timeout or capture error.
+ */
+static int
+wait_for_offer(pcap_t *handle, int timeout_sec)
+{
+    time_t deadline = time(NULL) + timeout_sec;
+
+    while (ip == 0 && time(NULL) < deadline)
+    {
+        int count = pcap_dispatch(handle, 16, ether_input, NULL);
+
+        if (count == -1)
+        {
+            PRINT(VERBOSE_LEVEL_ERROR, "Capture failed: %s", pcap_geterr(handle));
+            return -1;
+        }
+        if (count == -2)    /* pcap_breakloop() from dhcp_input */
+            break;
+    }
+
+    return ip != 0 ? 0 : -1;
+}
+
 int dhcpClientRenew(int argc, char *argv[])
 {
     int result;
@@ -414,29 +498,44 @@ int dhcpClientRenew(int argc, char *argv[])
           dev, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     /* Open the device and get pcap handle for it */
-    pcap_handle = pcap_open_live(dev, BUFSIZ, 0, 10, errbuf);
+    pcap_handle = pcap_open_live(dev, BUFSIZ, 0, 100, errbuf);
     if (pcap_handle == NULL)
     {
         PRINT(VERBOSE_LEVEL_ERROR, "Couldn't open device %s: %s", dev, errbuf);
         return -1;
     }
 
+    if (set_capture_filter(pcap_handle, dev) != 0)
+    {
+        result = -1;
+        goto done;
+    }
+
+    srand((unsigned int)(time(NULL) ^ getpid()));
+    dhcp_xid = ((u_int32_t)rand() << 16) ^ (u_int32_t)rand();
+    ip = 0;
+
     /* Send DHCP DISCOVERY packet */
     result = dhcp_discovery(mac);
     if (result)
     {
-        PRINT(VERBOSE_LEVEL_ERROR, "Couldn't send DHCP DISCOVERY on device %s: %s", dev, errbuf);
+        PRINT(VERBOSE_LEVEL_ERROR, "Couldn't send DHCP DISCOVERY on device %s", dev);
         goto done;
     }
 
-    ip = 0;
     PRINT(VERBOSE_LEVEL_INFO, "Waiting for DHCP_OFFER");
-    /* Listen till the DHCP OFFER comes */
-    pcap_loop(pcap_handle, -1, ether_input, NULL);
+    result = wait_for_offer(pcap_handle, DHCP_OFFER_TIMEOUT_SEC);
+    if (result != 0)
+    {
+        PRINT(VERBOSE_LEVEL_ERROR, "No DHCP_OFFER on %s after %d seconds", dev, DHCP_OFFER_TIMEOUT_SEC);
+        goto done;
+    }
+
     printf("Got IP %u.%u.%u.%u\n", ip >> 24, ((ip << 8) >> 24), (ip << 16) >> 24, (ip << 24) >> 24);
 
 done:
     pcap_close(pcap_handle);
+    pcap_handle = NULL;
 
     return result;
 }

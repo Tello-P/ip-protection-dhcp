@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <net/if.h>
 #include <linux/if_arp.h>
+#include <time.h>
 
 
 void printMac(const unsigned char *mac) {
@@ -14,12 +15,26 @@ void printMac(const unsigned char *mac) {
          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-int incrementAndSetMac(const char *interfaceName){
+/*
+ * Draw a fresh MAC. Every byte is random, so the real OUI is not preserved and
+ * two addresses cannot be linked. Octet 0 gets the locally-administered bit
+ * (0x02) set and the multicast bit (0x01) cleared - the kernel refuses a
+ * multicast source address.
+ */
+static void randomizeMac(unsigned char *mac){
+  int i;
+
+  for (i = 0; i < 6; i++)
+    mac[i] = (unsigned char)(rand() & 0xFF);
+
+  mac[0] = (mac[0] & 0xFC) | 0x02;
+}
+
+int randomizeAndSetMac(const char *interfaceName){
   int sock;
   struct ifreq ifr;
   unsigned char currentMac[6];
   unsigned char newMac[6];
-  int i;
 
   sock = socket(AF_INET, SOCK_DGRAM, 0);
   if (sock==-1){
@@ -42,20 +57,8 @@ int incrementAndSetMac(const char *interfaceName){
   printMac(currentMac);
   printf("\n");
 
-  memcpy(newMac, currentMac, 6);
-  int carry = 1;
-  for (i = 5; i>=0; i--){
-    int sum = (unsigned char)newMac[i] +carry;
-    newMac[i] = sum & 0xFF;
-    carry = sum >> 8;
-    if (carry == 0) break;
-  }
-
-  if (carry){
-    /*OVERFLOW*/
-    printf("Warning: MAC overflow, setting to 00:00:00:00:00:00\n");
-    memset(newMac, 0, 6);
-  }
+  srand((unsigned int)(time(NULL) ^ getpid()));
+  randomizeMac(newMac);
 
   printf("New MAC: ");
   printMac(newMac);
@@ -65,12 +68,12 @@ int incrementAndSetMac(const char *interfaceName){
   memcpy(ifr.ifr_hwaddr.sa_data, newMac, 6);
 
   if (ioctl(sock, SIOCSIFHWADDR, &ifr)==-1){
-    perror("SIOCGIFHWADDR (change MAC)");
+    perror("SIOCSIFHWADDR (change MAC)");
     close(sock);
     return -1;
   }
 
-  printf("MAC is changed");
+  printf("MAC is changed\n");
 
   close(sock);
   return 0;
@@ -107,6 +110,7 @@ int setInterfaceState(const char *interfaceName, int state)
   /*Set changes*/
   if (ioctl(sock, SIOCSIFFLAGS, &ifr) == -1){
     perror("SIOCSIFFLAGS");
+    close(sock);
     return -1;
   }
 
@@ -126,8 +130,11 @@ int changeMac(int argc, char *argv[]){
 
   if (setInterfaceState(interfaceName, 0) != 0)
     return 1;
-  if (incrementAndSetMac(interfaceName) != 0)
+  if (randomizeAndSetMac(interfaceName) != 0){
+    /* Bring the link back up so a failed rewrite does not leave it down */
+    setInterfaceState(interfaceName, 1);
     return 1;
+  }
   if (setInterfaceState(interfaceName, 1) != 0)
     return 1;
 
