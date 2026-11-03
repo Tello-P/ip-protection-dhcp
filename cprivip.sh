@@ -3,7 +3,7 @@
 set -euo pipefail
 
 VENV_DIR=".venv"
-APP_SCRIPT="src/dashboard.py"
+APP_MODULE="privip.gui"
 
 if [ ! -d "$VENV_DIR" ] || [ ! -f "$VENV_DIR/bin/activate" ]; then
   echo "ERROR: No valid virtual environment found in $VENV_DIR"
@@ -31,4 +31,4 @@ fi
 echo "Environment activated → $(python --version 2>&1 | head -n1)"
 echo "Launching application..."
 
-python "$APP_SCRIPT" "$@"
+python -m "$APP_MODULE" "$@"

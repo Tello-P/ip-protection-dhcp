@@ -38,7 +38,7 @@ The GUI is the recommended way to use the tool. It provides real-time MAC/IP mon
 
 ```bash
 source .venv/bin/activate
-python src/dashboard.py
+python -m privip.gui
 ```
 
 **GUI Features:**

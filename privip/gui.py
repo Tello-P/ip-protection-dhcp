@@ -1,10 +1,11 @@
 import customtkinter as ctk
-import subprocess
 import os
-import re
+import subprocess
 import sys
-import json
 import threading
+
+from . import network
+from .config import load_config, save_config
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -15,11 +16,8 @@ class PrivIPApp(ctk.CTk):
         
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.binary_path = os.path.join(self.base_dir, "bin", "privipchanger")
-        self.monitor_script = os.path.join(self.base_dir, "src", "monitor.py")
-        self.config_file = os.path.expanduser("~/.privip_config.json")
-        self.service_path = os.path.expanduser("~/.config/systemd/user/privip-monitor.service")
 
-        self.config = self.load_config()
+        self.config = load_config()
 
         self.title("PrivIP Changer Pro")
         self.geometry("600x700")
@@ -29,16 +27,9 @@ class PrivIPApp(ctk.CTk):
         self.check_service_status()
         self.start_auto_refresh() # Inicia el bucle de 5 segundos
 
-    def load_config(self):
-        if os.path.exists(self.config_file):
-            with open(self.config_file, 'r') as f:
-                return json.load(f)
-        return {"interface": "wlan0", "auto_firefox": False}
-
     def save_config(self):
         self.config["interface"] = self.interface_var.get()
-        with open(self.config_file, 'w') as f:
-            json.dump(self.config, f)
+        save_config(self.config)
 
     def setup_ui(self):
         # Header
@@ -52,7 +43,7 @@ class PrivIPApp(ctk.CTk):
         self.lbl_iface = ctk.CTkLabel(self.frame_iface, text="Network Interface:")
         self.lbl_iface.pack(side="left", padx=10)
         
-        ifaces = os.listdir('/sys/class/net/')
+        ifaces = network.list_interfaces()
         self.interface_var = ctk.StringVar(value=self.config.get("interface", "wlan0"))
         self.combo = ctk.CTkOptionMenu(self.frame_iface, values=ifaces, variable=self.interface_var, 
                                        command=self.on_interface_change)
@@ -97,21 +88,12 @@ class PrivIPApp(ctk.CTk):
 
     def refresh_network_info(self):
         iface = self.interface_var.get()
-        # Obtener MAC
-        try:
-            with open(f"/sys/class/net/{iface}/address", "r") as f:
-                mac = f.read().strip().upper()
-                self.lbl_mac.configure(text=f"MAC: {mac}")
-        except OSError:
-            self.lbl_mac.configure(text="MAC: Error al leer")
+        mac = network.read_mac(iface)
+        self.lbl_mac.configure(text=f"MAC: {mac}" if mac else "MAC: Error al leer")
 
-        # Obtener IP
         try:
-            res = subprocess.run(["ip", "-4", "addr", "show", iface],
-                                 capture_output=True, text=True)
-            match = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", res.stdout)
-            ip = match.group(1) if match else ""
-            self.lbl_ip.configure(text=f"IP: {ip if ip else 'Desconectado'}")
+            ip = network.get_ipv4(iface)
+            self.lbl_ip.configure(text=f"IP: {ip or 'Desconectado'}")
         except (OSError, subprocess.SubprocessError):
             self.lbl_ip.configure(text="IP: Error")
 
@@ -123,18 +105,16 @@ class PrivIPApp(ctk.CTk):
         self.log(f"[EXEC] Running {self.binary_path} on {self.interface_var.get()}...")
         
         try:
-            process = subprocess.Popen([self.binary_path, self.interface_var.get()], 
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            stdout, stderr = process.communicate()
+            code, stdout, stderr = network.change_identity(self.binary_path, self.interface_var.get())
             if stdout: self.log(f"[STDOUT] {stdout.strip()}")
             if stderr: self.log(f"[STDERR] {stderr.strip()}")
-            if process.returncode == 0:
+            if code == 0:
                 self.log("[DONE] Identity changed.")
             else:
-                self.log(f"[FAIL] Binary exited with code {process.returncode} - identity NOT changed.")
+                self.log(f"[FAIL] Binary exited with code {code} - identity NOT changed.")
         except Exception as e:
             self.log(f"[ERROR] {str(e)}")
-        
+
         self.refresh_network_info()
         self.btn_run.configure(state="normal", text="FORCE IDENTITY CHANGE")
 
@@ -152,34 +132,15 @@ class PrivIPApp(ctk.CTk):
         return sys.executable or "/usr/bin/python3"
 
     def install_service(self):
-        os.makedirs(os.path.dirname(self.service_path), exist_ok=True)
-        content = f"""[Unit]
-Description=PrivIP Firefox Watchdog
-After=network.target
-
-[Service]
-ExecStart={self._service_python()} {self.monitor_script}
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-"""
-        with open(self.service_path, "w") as f: f.write(content)
-        subprocess.run(["systemctl", "--user", "daemon-reload"])
-        subprocess.run(["systemctl", "--user", "enable", "privip-monitor.service"])
-        subprocess.run(["systemctl", "--user", "start", "privip-monitor.service"])
+        network.install_service(self._service_python(), self.base_dir)
         self.log("[SERVICE] Background monitor ENABLED.")
 
     def uninstall_service(self):
-        subprocess.run(["systemctl", "--user", "stop", "privip-monitor.service"])
-        subprocess.run(["systemctl", "--user", "disable", "privip-monitor.service"])
-        if os.path.exists(self.service_path): os.remove(self.service_path)
+        network.uninstall_service()
         self.log("[SERVICE] Background monitor DISABLED.")
 
     def check_service_status(self):
-        res = subprocess.run(["systemctl", "--user", "is-active", "privip-monitor.service"], capture_output=True, text=True)
-        if res.stdout.strip() == "active":
+        if network.is_service_active():
             self.log("[INFO] El servicio ya está funcionando en segundo plano.")
         else:
             self.log("[INFO] El servicio está detenido.")
@@ -188,6 +149,9 @@ WantedBy=default.target
         self.textbox_log.insert("end", msg + "\n")
         self.textbox_log.see("end")
 
+def main():
+    PrivIPApp().mainloop()
+
+
 if __name__ == "__main__":
-    app = PrivIPApp()
-    app.mainloop()
+    main()
